@@ -1,0 +1,9 @@
+Documentazione API: MSBuildLocator (classe) — https://learn.microsoft.com/dotnet/api/microsoft.build.locator.msbuildlocator?view=msbuildlocator-1.5
+
+Namespace Microsoft.Build.Locator — https://learn.microsoft.com/dotnet/api/microsoft.build.locator?view=msbuildlocator-1.5
+
+NuGet package “Microsoft.Build.Locator” — https://www.nuget.org/packages/Microsoft.Build.Locator
+
+Repository GitHub del progetto — https://github.com/microsoft/MSBuildLocator
+
+Articolo su come “Find and use a version of MSBuild” che spiega l’uso del locator — https://learn.microsoft.com/visualstudio/msbuild/find-and-use-msbuild-versions?view=vs-2022
