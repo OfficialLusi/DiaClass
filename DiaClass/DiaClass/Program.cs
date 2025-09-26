@@ -29,6 +29,14 @@ public class Program
 
         Service service = new Service(path);
 
-        await service.Initialize(); // Await the asynchronous method
+        await service.InitializeAsync();
+
+        var graph = await service.ExtractRelationsAsync(projectName: "DiaClass", onlyInternalToProject: true);
+
+        // Mermaid you can paste into docs / markdown renderers:
+        var mermaid = graph.ToMermaid();
+        // write to a file if you want
+        File.WriteAllText("diagram.mmd", mermaid);
+
     }
 }
