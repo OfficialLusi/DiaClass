@@ -1,22 +1,22 @@
 BuildLocator
 
-Documentazione API: MSBuildLocator (classe) — https://learn.microsoft.com/dotnet/api/microsoft.build.locator.msbuildlocator?view=msbuildlocator-1.5
+API documentation: MSBuildLocator (classe) — https://learn.microsoft.com/dotnet/api/microsoft.build.locator.msbuildlocator?view=msbuildlocator-1.5
 
 Namespace Microsoft.Build.Locator — https://learn.microsoft.com/dotnet/api/microsoft.build.locator?view=msbuildlocator-1.5
 
 NuGet package “Microsoft.Build.Locator” — https://www.nuget.org/packages/Microsoft.Build.Locator
 
-Repository GitHub del progetto — https://github.com/microsoft/MSBuildLocator
+GitHub Repository of the project — https://github.com/microsoft/MSBuildLocator
 
-Articolo su come “Find and use a version of MSBuild” che spiega l’uso del locator — https://learn.microsoft.com/visualstudio/msbuild/find-and-use-msbuild-versions?view=vs-2022
+Article “Find and use a version of MSBuild” that explain the use of locator — https://learn.microsoft.com/visualstudio/msbuild/find-and-use-msbuild-versions?view=vs-2022
 
 
 MSBuild/Roslyn
 
 NuGet package Microsoft.CodeAnalysis.Workspaces.MSBuild — https://www.nuget.org/packages/Microsoft.CodeAnalysis.Workspaces.MSBuild/
 
-Documentazione generale sul Workspace / Roslyn “Work with the .NET Compiler Platform SDK workspace model” — https://learn.microsoft.com/dotnet/csharp/roslyn-sdk/work-with-workspace
+General documentation on Workspace / Roslyn “Get started with MSBuild and the .NET Compiler Platform SDK” — https://learn.microsoft.com/dotnet/csharp/roslyn-sdk/work-with-workspace 
 
-API Workspace (classe Workspace) — https://learn.microsoft.com/dotnet/api/microsoft.codeanalysis.workspace?view=roslyn-dotnet-4.13.0
+API Workspace (class Workspace) — https://learn.microsoft.com/dotnet/api/microsoft.codeanalysis.workspace?view=roslyn-dotnet-4.13.0
 
 NuGet package Microsoft.CodeAnalysis.CSharp.Workspaces — https://www.nuget.org/packages/Microsoft.CodeAnalysis.CSharp.Workspaces/
