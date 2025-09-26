@@ -1,265 +1,290 @@
 ﻿using Microsoft.Build.Locator;
 using Microsoft.CodeAnalysis;
-using Microsoft.CodeAnalysis.CSharp;
-using Microsoft.CodeAnalysis.CSharp.Syntax;
 using Microsoft.CodeAnalysis.MSBuild;
 
 namespace DiaClass;
 
-public class Service
+public sealed class Service
 {
-    private string _solutionFolderPath;
-    private Solution _solution;
-    private List<Project> _projects = new List<Project>();
+    private readonly string _solutionFolderPath;
+    private Solution? _solution;
+    private readonly List<Project> _projects = new();
 
     public Service(string solutionFolderPath)
     {
         _solutionFolderPath = solutionFolderPath;
     }
 
-    public async Task Initialize()
+    /// <summary>
+    /// Loads the solution or projects from the provided path.
+    /// Optionally pass a project name later to work on a specific project.
+    /// </summary>
+    public async Task InitializeAsync()
     {
-        // if no MSBuild instances are registered, register the default instance
         if (!MSBuildLocator.IsRegistered)
             MSBuildLocator.RegisterDefaults();
 
         using var workspace = MSBuildWorkspace.Create();
+        workspace.WorkspaceFailed += (_, __) => { /* swallow diagnostics or hook up your logger */ };
 
-        // Log any issues Roslyn/MSBuild hit while loading
-        workspace.WorkspaceFailed += (o, e) => Console.WriteLine($"[MSBuild] {e.Diagnostic}");
+        _solution = await OpenSolutionOrProjectsAsync(workspace, _solutionFolderPath);
+        if (_solution is null) return;
 
-
-        #region Load Solution or Projects
-        if (Path.GetExtension(_solutionFolderPath).Equals(".sln", StringComparison.OrdinalIgnoreCase))
-        {
-            _solution = await workspace.OpenSolutionAsync(_solutionFolderPath);
-        }
-        else if (Path.GetExtension(_solutionFolderPath).Equals(".csproj", StringComparison.OrdinalIgnoreCase))
-        {
-            Project project = await workspace.OpenProjectAsync(_solutionFolderPath);
-            _solution = project.Solution;
-        }
-        else
-        {
-            // Treat as folder:
-            // Prefer a .sln if one exists; otherwise load all .csproj files
-            string? sln = Directory.EnumerateFiles(_solutionFolderPath, "*.sln", SearchOption.AllDirectories).FirstOrDefault();
-            if (sln is not null)
-            {
-                _solution = await workspace.OpenSolutionAsync(sln);
-            }
-            else
-            {
-                IEnumerable<string> projectPaths = Directory.EnumerateFiles(_solutionFolderPath, "*.csproj", SearchOption.AllDirectories);
-                foreach (var proj in projectPaths)
-                    workspace.OpenProjectAsync(proj); // adds to CurrentSolution
-                _solution = workspace.CurrentSolution;
-            }
-        }
-
-        if (_solution is null)
-        {
-            Console.WriteLine("No solution or C# projects found.");
-            return;
-        }
-
-        Console.WriteLine("Solution correctly loaded");
-        #endregion
-
-        foreach (Project project in _solution.Projects.Where(x => x.Language == LanguageNames.CSharp))
-        {
-            _projects.Add(project);
-        }
-        Console.WriteLine($"Found {_projects.Count} C# projects");
-
-        await ManageProjects();
+        _projects.Clear();
+        _projects.AddRange(_solution.Projects.Where(p => p.Language == LanguageNames.CSharp));
     }
 
-    public async Task ManageProjects()
+    /// <summary>
+    /// Returns all C# projects discovered after InitializeAsync().
+    /// </summary>
+    public IReadOnlyList<Project> GetProjects() => _projects;
+
+    /// <summary>
+    /// Extracts type relations for a given project.
+    /// If projectName is null, the first C# project is used.
+    /// </summary>
+    public async Task<RelationGraph> ExtractRelationsAsync(string? projectName = null, bool onlyInternalToProject = true)
     {
-        Project selectedProject = SelectProject();
+        if (_solution is null || _projects.Count == 0)
+            throw new InvalidOperationException("Call InitializeAsync() first and ensure there are C# projects.");
 
-        // Choose how to group: logical folders (preferred) or physical directories.
-        var docsByFolder = selectedProject.Documents
-            .GroupBy(d => d.Folders.Count > 0 ? string.Join("/", d.Folders)
-                                              : Path.GetDirectoryName(d.FilePath) ?? "")
-            .OrderBy(g => g.Key);
+        var project = projectName is null
+            ? _projects[0]
+            : _projects.FirstOrDefault(p => string.Equals(p.Name, projectName, StringComparison.OrdinalIgnoreCase))
+              ?? throw new ArgumentException($"Project '{projectName}' not found.");
 
+        var compilation = await project.GetCompilationAsync().ConfigureAwait(false)
+            ?? throw new InvalidOperationException("Compilation could not be created.");
 
-        foreach (var folderGroup in docsByFolder)
+        var graph = new RelationGraph(project.AssemblyName ?? project.Name);
+
+        // Collect all named types from the compilation (classes, structs, records, interfaces, enums)
+        foreach (var type in GetAllNamedTypes(compilation.Assembly.GlobalNamespace))
         {
-            Console.WriteLine($"\n-- Folder: {(string.IsNullOrEmpty(folderGroup.Key) ? "(root)" : folderGroup.Key)}");
+            // Optionally scope to types declared in this project's assembly
+            if (onlyInternalToProject && !SymbolEqualityComparer.Default.Equals(type.ContainingAssembly, compilation.Assembly))
+                continue;
 
-            foreach (var doc in folderGroup.OrderBy(d => d.Name))
+            var source = Display(type);
+
+            // Contains (nested types)
+            if (type.ContainingType is INamedTypeSymbol ct)
             {
-                Console.WriteLine($"  File: {Path.GetFileName(doc.FilePath)}");
+                var parent = Display(ct);
+                if (IncludeType(ct, compilation, onlyInternalToProject))
+                    graph.AddEdge(parent, source, RelationKind.Contains);
+            }
 
-                CompilationUnitSyntax? root = (CompilationUnitSyntax)await doc.GetSyntaxRootAsync().ConfigureAwait(false);
-
-                if (root is not null)
+            // Inheritance (base type)
+            if (type.TypeKind is TypeKind.Class or TypeKind.Struct)
+            {
+                var baseType = type.BaseType;
+                if (baseType is not null &&
+                    baseType.SpecialType != SpecialType.System_Object &&
+                    IncludeType(baseType, compilation, onlyInternalToProject))
                 {
-                    Console.WriteLine("Root Syntax Node Information:");
-                    Console.WriteLine($"Kind: {root.Kind()}");
-                    Console.WriteLine($"Full Text: {root.ToFullString()}");
-                    Console.WriteLine($"Child Nodes Count: {root.ChildNodes().Count()}");
-
-                    Console.WriteLine("\nChild Nodes:");
-                    foreach (var child in root.ChildNodes())
-                    {
-                        Console.WriteLine($" - Kind: {child.Kind()}, Text: {child.ToString().Trim()}");
-                    }
+                    graph.AddEdge(source, Display(baseType), RelationKind.Inherits);
                 }
-                else
+            }
+
+            // Implements (interfaces, including through base)
+            foreach (var i in type.Interfaces)
+            {
+                if (IncludeType(i, compilation, onlyInternalToProject))
+                    graph.AddEdge(source, Display(i), RelationKind.Implements);
+            }
+
+            // Members → usage edges
+            foreach (var m in type.GetMembers())
+            {
+                switch (m)
                 {
-                    Console.WriteLine("Root syntax node is null.");
-                }
+                    case IFieldSymbol f when IncludeType(f.Type, compilation, onlyInternalToProject):
+                        graph.AddEdge(source, Display(NormalizeNullable(f.Type)), RelationKind.FieldUses);
+                        break;
 
-                if (root is null) continue;
+                    case IPropertySymbol p when IncludeType(p.Type, compilation, onlyInternalToProject):
+                        graph.AddEdge(source, Display(NormalizeNullable(p.Type)), RelationKind.PropertyUses);
+                        break;
 
-                SemanticModel? model = await doc.GetSemanticModelAsync().ConfigureAwait(false);
-                if (model is null)
-                {
-                    Console.WriteLine("Semantic model is null.");
-                    continue;
-                }
+                    case IMethodSymbol method:
+                        {
+                            // Return type
+                            if (method.MethodKind != MethodKind.PropertyGet &&
+                                method.MethodKind != MethodKind.PropertySet &&
+                                method.ReturnType.SpecialType != SpecialType.System_Void &&
+                                IncludeType(method.ReturnType, compilation, onlyInternalToProject))
+                            {
+                                graph.AddEdge(source, Display(NormalizeNullable(method.ReturnType)), RelationKind.MethodReturns);
+                            }
 
-                Console.WriteLine("Semantic Model Information:");
-                Console.WriteLine($"Compilation: {model.Compilation.AssemblyName}");
-                Console.WriteLine($"Syntax Tree: {model.SyntaxTree.FilePath}");
+                            // Parameters
+                            foreach (var p in method.Parameters)
+                            {
+                                if (IncludeType(p.Type, compilation, onlyInternalToProject))
+                                    graph.AddEdge(source, Display(NormalizeNullable(p.Type)), RelationKind.MethodParameter);
+                            }
 
-                foreach (var info in EnumerateTypeDeclarations(root, model))
-                {
-                    // Example output line
-                    Console.WriteLine(
-                        $"    [{info.Kind}] {info.NamespaceDisplay}{info.ContainingTypeDisplay}{info.Name} " +
-                        $"{info.Modifiers} {info.Accessibility}".Trim());
+                            break;
+                        }
                 }
             }
         }
 
+        return graph;
     }
 
-    private Project SelectProject()
+    // ----------------- Helpers -----------------
+
+    private static async Task<Solution?> OpenSolutionOrProjectsAsync(MSBuildWorkspace workspace, string path)
     {
-        Console.WriteLine("Select a project:");
-        for (int i = 0; i < _projects.Count; i++)
+        if (File.Exists(path))
         {
-            Console.WriteLine($" - {_projects[i].Name}");
+            var ext = Path.GetExtension(path);
+            if (ext.Equals(".sln", StringComparison.OrdinalIgnoreCase))
+                return await workspace.OpenSolutionAsync(path);
+
+            if (ext.Equals(".csproj", StringComparison.OrdinalIgnoreCase))
+                return (await workspace.OpenProjectAsync(path)).Solution;
         }
 
-        while (true)
+        var sln = Directory.EnumerateFiles(path, "*.sln", SearchOption.AllDirectories).FirstOrDefault();
+        if (sln is not null) return await workspace.OpenSolutionAsync(sln);
+
+        foreach (var csproj in Directory.EnumerateFiles(path, "*.csproj", SearchOption.AllDirectories))
+            await workspace.OpenProjectAsync(csproj);
+
+        return workspace.CurrentSolution;
+    }
+
+    private static IEnumerable<INamedTypeSymbol> GetAllNamedTypes(INamespaceSymbol ns)
+    {
+        foreach (var member in ns.GetMembers())
         {
-            string? input = Console.ReadLine();
-            if (input is null) continue;
-            Project? project = _projects.FirstOrDefault(p => p.Name.Equals(input, StringComparison.OrdinalIgnoreCase));
-            if (project is not null)
+            if (member is INamespaceSymbol childNs)
             {
-                Console.WriteLine($"Project '{project.Name}' selected.");
-                return project;
+                foreach (var t in GetAllNamedTypes(childNs))
+                    yield return t;
             }
-            else
+            else if (member is INamedTypeSymbol t)
             {
-                Console.WriteLine("Project not found. Please try again.");
+                foreach (var nt in FlattenNestedTypes(t))
+                    yield return nt;
             }
         }
     }
 
-
-
-
-    private static IEnumerable<TypeInfoRow> EnumerateTypeDeclarations(CompilationUnitSyntax root, SemanticModel model)
+    private static IEnumerable<INamedTypeSymbol> FlattenNestedTypes(INamedTypeSymbol t)
     {
-        var typeNodes = root.DescendantNodes().Where(n =>
-               n is ClassDeclarationSyntax
-            || n is InterfaceDeclarationSyntax
-            || n is EnumDeclarationSyntax
-            || n is StructDeclarationSyntax
-            || n is RecordDeclarationSyntax);
-
-        foreach (var node in typeNodes)
+        yield return t;
+        foreach (var n in t.GetTypeMembers())
         {
-            ISymbol? symbol = node switch
-            {
-                ClassDeclarationSyntax cls => model.GetDeclaredSymbol(cls),
-                InterfaceDeclarationSyntax i => model.GetDeclaredSymbol(i),
-                EnumDeclarationSyntax en => model.GetDeclaredSymbol(en),
-                StructDeclarationSyntax st => model.GetDeclaredSymbol(st),
-                RecordDeclarationSyntax rec => model.GetDeclaredSymbol(rec),
-                _ => null
-            };
+            foreach (var nt in FlattenNestedTypes(n))
+                yield return nt;
+        }
+    }
 
-            if (symbol is null) continue;
+    private static bool IncludeType(ITypeSymbol type, Compilation compilation, bool onlyInternal)
+    {
+        var nt = (type as INamedTypeSymbol)?.ConstructedFrom ?? type as INamedTypeSymbol;
+        if (nt is null) return false;
 
-            yield return new TypeInfoRow
+        // Skip primitives and special types
+        if (nt.SpecialType != SpecialType.None) return false;
+
+        // Optionally restrict to this assembly
+        return !onlyInternal || SymbolEqualityComparer.Default.Equals(nt.ContainingAssembly, compilation.Assembly);
+    }
+
+    private static ITypeSymbol NormalizeNullable(ITypeSymbol t) =>
+        t is INamedTypeSymbol n && n.OriginalDefinition.SpecialType is SpecialType.System_Nullable_T
+            ? n.TypeArguments[0]
+            : t;
+
+    private static string Display(ISymbol s) =>
+        s.ToDisplayString(new SymbolDisplayFormat(
+            typeQualificationStyle: SymbolDisplayTypeQualificationStyle.NameAndContainingTypesAndNamespaces,
+            genericsOptions: SymbolDisplayGenericsOptions.IncludeTypeParameters));
+
+    // ----------------- Public DTOs -----------------
+
+    public enum RelationKind
+    {
+        Inherits,
+        Implements,
+        FieldUses,
+        PropertyUses,
+        MethodReturns,
+        MethodParameter,
+        Contains
+    }
+
+    public sealed class Relation
+    {
+        public string From { get; init; } = "";
+        public string To { get; init; } = "";
+        public RelationKind Kind { get; init; }
+    }
+
+    public sealed class RelationGraph
+    {
+        public string Scope { get; }
+        public IReadOnlyCollection<string> Nodes => _nodes;
+        public IReadOnlyCollection<Relation> Edges => _edges;
+
+        private readonly HashSet<string> _nodes = new();
+        private readonly List<Relation> _edges = new();
+
+        public RelationGraph(string scope) => Scope = scope;
+
+        public void AddEdge(string from, string to, RelationKind kind)
+        {
+            if (from == to) return; // ignore self loops
+            _nodes.Add(from);
+            _nodes.Add(to);
+            _edges.Add(new Relation { From = from, To = to, Kind = kind });
+        }
+
+        /// <summary>
+        /// Produces a Mermaid class diagram (simple and readable).
+        /// </summary>
+        public string ToMermaid()
+        {
+            // Group edges by kind for readable arrows
+            // inherits: <|--, implements: <|..
+            // uses: ..> (with labels)
+            var sb = new System.Text.StringBuilder();
+            sb.AppendLine("classDiagram");
+
+            // Declare classes
+            foreach (var n in _nodes.OrderBy(s => s))
             {
-                Kind = symbol.Kind switch
+                var id = Escape(n);
+                sb.AppendLine($"class {id}");
+            }
+
+            foreach (var e in _edges)
+            {
+                var a = Escape(e.From);
+                var b = Escape(e.To);
+                var line = e.Kind switch
                 {
-                    SymbolKind.NamedType => ((INamedTypeSymbol)symbol).TypeKind switch
-                    {
-                        TypeKind.Class => "class",
-                        TypeKind.Struct => "struct",
-                        TypeKind.Interface => "interface",
-                        TypeKind.Enum => "enum",
-                        TypeKind.Delegate => "delegate",
-                        _ => "type"
-                    },
-                    _ => symbol.Kind.ToString().ToLowerInvariant()
-                },
-                Name = symbol.Name,
-                NamespaceDisplay = GetNamespacePrefix(symbol),
-                ContainingTypeDisplay = GetContainingTypePrefix(symbol),
-                Accessibility = symbol.DeclaredAccessibility.ToString().ToLowerInvariant(),
-                Modifiers = GetModifiers(node)
-            };
+                    RelationKind.Inherits => $"{b} <|-- {a}",
+                    RelationKind.Implements => $"{b} <|.. {a}",
+                    RelationKind.Contains => $"{a} *-- {b}",
+                    RelationKind.FieldUses => $"{a} ..> {b} : field",
+                    RelationKind.PropertyUses => $"{a} ..> {b} : property",
+                    RelationKind.MethodReturns => $"{a} ..> {b} : returns",
+                    RelationKind.MethodParameter => $"{a} ..> {b} : param",
+                    _ => $"{a} ..> {b}"
+                };
+                sb.AppendLine(line);
+            }
+
+            return sb.ToString();
+
+            static string Escape(string s)
+                => s.Replace('<', '_').Replace('>', '_').Replace('.', '_').Replace('+', '_').Replace(',', '_').Replace(' ', '_');
         }
-    }
-
-    private static string GetNamespacePrefix(ISymbol symbol)
-    {
-        var ns = symbol.ContainingNamespace;
-        if (ns == null || ns.IsGlobalNamespace) return "";
-        return ns.ToDisplayString(SymbolDisplayFormat.MinimallyQualifiedFormat) + ".";
-    }
-
-    private static string GetContainingTypePrefix(ISymbol symbol)
-    {
-        var stack = new Stack<string>();
-        var t = symbol.ContainingType;
-        while (t != null)
-        {
-            stack.Push(t.Name);
-            t = t.ContainingType;
-        }
-        return stack.Count > 0 ? string.Join(".", stack) + "." : "";
-    }
-
-    private static string GetModifiers(SyntaxNode node)
-    {
-        SyntaxTokenList mods = node switch
-        {
-            BaseTypeDeclarationSyntax td => td.Modifiers,
-            //EnumDeclarationSyntax ed => ed.Modifiers,
-            _ => default
-        };
-        // Keep a small, readable subset
-        var list = mods.Where(m =>
-                m.IsKind(SyntaxKind.PartialKeyword) ||
-                m.IsKind(SyntaxKind.StaticKeyword) ||
-                m.IsKind(SyntaxKind.AbstractKeyword) ||
-                m.IsKind(SyntaxKind.SealedKeyword) ||
-                m.IsKind(SyntaxKind.ReadOnlyKeyword))
-            .Select(m => m.Text);
-        var s = string.Join(" ", list);
-        return string.IsNullOrWhiteSpace(s) ? "" : $"({s})";
-    }
-
-    private record TypeInfoRow
-    {
-        public string Kind { get; init; } = "";
-        public string Name { get; init; } = "";
-        public string NamespaceDisplay { get; init; } = "";
-        public string ContainingTypeDisplay { get; init; } = "";
-        public string Accessibility { get; init; } = "";
-        public string Modifiers { get; init; } = "";
     }
 }
