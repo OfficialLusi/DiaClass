@@ -31,12 +31,33 @@ public class Program
 
         await service.InitializeAsync();
 
-        var graph = await service.ExtractRelationsAsync(projectName: "DiaClass", onlyInternalToProject: true);
+        var graph = await service.ExtractRelationsAsync(projectName: "MeltField", onlyInternalToProject: true);
 
-        // Mermaid you can paste into docs / markdown renderers:
-        var mermaid = graph.ToMermaid();
-        // write to a file if you want
-        File.WriteAllText("diagram.mmd", mermaid);
+        // (a) Per-context diagrams (group into packages by context)
+        string ContextOf(string full)
+        {
+            var p = full.Split('.');
+            var i = Array.FindIndex(p, x => x is "Domain" or "Application" or "Infrastructure");
+            return i >= 0 ? p[i] : "Other";
+        }
+        string? PackageOf(string full) => ContextOf(full);
+
+        // Structure only (inheritance/implements/contains) per project
+        var structureKinds = new HashSet<RelationKind>
+        {
+            RelationKind.Inherits,
+            RelationKind.Implements,
+            RelationKind.Contains
+        };
+
+        File.WriteAllText("project-structure.puml",
+            PlantUmlExporter.ToPlantUml(graph, includeKinds: structureKinds,
+                                        shortName: s => s.Split('.').Last(),
+                                        packageOf: PackageOf));
+
+        // (b) Inter-context overview (3 boxes with counts)
+        File.WriteAllText("inter-context.puml",
+            PlantUmlExporter.ToPlantUmlInterContext(graph, ContextOf, usesOnly: true));
 
     }
 }
